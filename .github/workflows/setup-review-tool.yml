@@ -1,0 +1,41 @@
+# .github/workflows/setup-review-tool.yml
+name: Setup Symfony Review Tool
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['composer.json']
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Check if Symfony project
+        id: check
+        run: |
+          if [ -f "composer.json" ] && grep -q "symfony" composer.json; then
+            echo "is_symfony=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Setup Review Tool
+        if: steps.check.outputs.is_symfony == 'true'
+        run: |
+          curl -sSL https://raw.githubusercontent.com/anisajengui/symfony-git-review/main/utils/install.sh | bash
+          
+          # Add to project scripts
+          mkdir -p scripts
+          curl -o scripts/review.sh https://raw.githubusercontent.com/anisajengui/symfony-git-review/main/symfony-review.sh
+          chmod +x scripts/review.sh
+          
+          # Update .gitignore
+          echo ".vscode/" >> .gitignore
+          
+          # Create PR
+          git config --global user.name 'Review Bot'
+          git config --global user.email 'bot@example.com'
+          git checkout -b setup/review-tool
+          git add scripts/ .gitignore
+          git commit -m "Add Symfony review tool integration"
+          git push origin setup/review-tool
