@@ -17,27 +17,33 @@
 
 ## 🚀 Quick Start
 
-```bash
-# One-line installation
-curl -sSL https://raw.githubusercontent.com/anisajengui/symfony-git-review/main/utils/install.sh | bash
 
-# Review your feature branch
+### One-line installation
+```bash
+curl -sSL https://raw.githubusercontent.com/anisajengui/symfony-git-review/main/utils/install.sh | bash
+```
+### Review your feature branch
+```bash
 symfony-review feature/my-branch --show
 ```
 
 ## 📖 Usage Examples
 
+
+### Basic usage
 ```bash
-# Basic usage
 symfony-review feature/user-authentication
-
-# Compare against develop branch
+```
+### Compare against develop branch
+```bash
 symfony-review feature/api-endpoints --base origin/develop --verbose
-
-# Use with Claude AI
+```
+### Use with Claude AI
+```bash
 symfony-review hotfix/security-fix --ai claude --show
-
-# Skip context scanning for speed
+```
+### Skip context scanning for speed
+```bash
 symfony-review feature/quick-fix --no-context
 ```
 
