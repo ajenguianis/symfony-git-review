@@ -22,6 +22,12 @@
 ```bash
 curl -sSL https://raw.githubusercontent.com/anisajengui/symfony-git-review/main/utils/install.sh | bash
 ```
+### Install required extensions
+```bash
+sudo apt update
+sudo apt install -y jq
+```
+
 ### Review your feature branch
 ```bash
 symfony-review feature/my-branch --show
