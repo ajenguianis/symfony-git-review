@@ -204,117 +204,193 @@ fi
 mkdir -p "$VSCODE_DIR"
 
 # === Step 1: Generate Symfony Features Matrix ===
-generate_features_matrix() {
-    if $PRIORITIZE_LATEST; then
-        log_feature "Generating Symfony 7.3+ features priority matrix..."
-        
-        cat > "$FEATURES_MATRIX" << FEATURES
-# 🆕 Symfony 7.3+ Features Priority Matrix
+generate_enhanced_features_matrix() {
+    if ! $PRIORITIZE_LATEST; then
+        return; fi
+    log_feature "Generating enhanced Symfony 7.3+ matrix..."
+    cat > "$VSCODE_DIR/symfony-features-matrix.md" << FEATURES
+# 🆕 Symfony 7.3+ Features Priority Matrix - Enhanced
 
-## 🎯 PRIORITY 1: Must Use Latest Features (Critical)
+## 🎯 CRITICAL PRIORITY: Immediate Action Required
+### ⏰ Date/Time Handling (Breaking Change Potential)
+- **DatePoint over DateTimeImmutable** ⭐ **HIGH IMPACT**
+  - ✅ Use: `Symfony\Component\Clock\DatePoint`
+  - ❌ Avoid: Avoid `DateTimeImmutable`, `DateTime`
+  - 🔍 **Detection Pattern**: `/new\s+(DateTime|DateTimeImmutable)/`
+  - 🚨 **Impact**: Clock component integration, timezone handling
+  - 🔧 **Auto-fix**: `DatePoint::createFromFormat()`
+  - 📊 **Effort**: 2–5 min per occurrence
 
-### ⏰ Date/Time Handling
-- **DatePoint over DateTimeImmutable**
-  - ✅ Use: \`Symfony\Component\Clock\DatePoint\`
-  - ❌ Avoid: \`DateTimeImmutable\`, \`new DateTime()\`
-  - 📍 Detection: Look for \`DateTimeImmutable\`, \`DateTime\` in changed files
-  - 🔧 Fix: Replace with DatePoint for Clock component integration
+### 🗄️ Doctrine DatePoint Integration
+- **✅ Use**: `DatePointType` in ORM mappings
+- **❌ Avoid**: `datetime_immutable` type
+- **🔍 Detection Pattern**: `/#\[ORM\\Column.*datetime_immutable/`
+- **🚨 Impact**: Database consistency, serialization
+- **🔧 Auto-fix**: Update Column type to DatePointType
+- **📊 Effort**: 1–2 min per field
 
-### 🚀 Command Improvements
-- **Invokable Commands with Attributes**
-  - ✅ Use: Attribute-based command configuration
-  - ❌ Avoid: Traditional command registration
-  - 📍 Detection: Commands extending Command without modern attributes
-  - 🔧 Fix: Implement invokable pattern with PHP attributes
-
-### 🗄️ Doctrine Enhancements
-- **DatePointType for Doctrine**
-  - ✅ Use: \`DatePointType\` in entity mappings
-  - ❌ Avoid: \`datetime_immutable\` type
-  - 📍 Detection: ORM mapping with old datetime types
-  - 🔧 Fix: Use DatePointType for better Clock integration
-
-## 🎯 PRIORITY 2: Recommended Modern Patterns (Major)
-
-### 🏗️ Service Configuration
-- **Autoconfigure and Autowire**
-  - ✅ Use: Modern service definitions with attributes
-  - ❌ Avoid: Manual service configuration when autoconfigure works
-  - 📍 Detection: Verbose YAML service definitions
-  - 🔧 Fix: Leverage Symfony's autoconfiguration
-
-### 🔐 Security Enhancements
-- **Security Attributes**
-  - ✅ Use: \`#[IsGranted]\`, \`#[Security]\` attributes
-  - ❌ Avoid: Manual security checks in controllers
-  - 📍 Detection: Manual \$this->denyAccessUnlessGranted() calls
-  - 🔧 Fix: Use security attributes for cleaner code
-
-### 📨 Event System
-- **AsEventListener Attribute**
-  - ✅ Use: \`#[AsEventListener]\` for event subscribers
-  - ❌ Avoid: Manual event listener registration
-  - 📍 Detection: Traditional EventSubscriberInterface usage
-  - 🔧 Fix: Modernize with attributes
-
-## 🎯 PRIORITY 3: Performance & DX Improvements (Minor)
-
-### 🎛️ Controller Enhancements
-- **MapRequestPayload & MapQueryString**
+## 🎯 HIGH PRIORITY: Modern Development Experience
+### 🚀 Enhanced Parameter Mapping
+- **MapRequestPayload & MapQueryString** ⭐ **DX IMPROVEMENT**
   - ✅ Use: Modern request parameter mapping
-  - ❌ Avoid: Manual request parameter extraction
-  - 📍 Detection: \$request->get(), \$request->query->get() patterns in changed files
-  - 🔧 Fix: Use parameter mapping attributes
+  - ❌ Avoid: Avoid manual parameter extraction
+  - 🔍 Detection: Pattern `/\\$request\\->(get|query->get|request->get)/`
+  - 🚨 **Impact**: Type safety, validation, performance
+  - 🔧 **Auto-fix**: `#[MapRequestPayload]` attribute
+  - 📊 **Effort**: 3–10 min per controller action
 
-### 🧪 Testing Improvements
-- **Modern Test Attributes**
-  - ✅ Use: Latest PHPUnit and Symfony test attributes
-  - ❌ Avoid: Deprecated testing patterns
-  - 📍 Detection: Old test method naming, deprecated assertions
-  - 🔧 Fix: Update to modern testing approach
+### 🔁 Automatic Entity Injection
+#### Entity Injection in Routes
+- **✅ Use**: Type-hinted entities as controller arguments
+- **❌ Avoid**: Manual entity lookups using repository
+- **🔍 Detection Pattern**: `Route.*{id}.*int\s+\$id.*repository`
+- **🚨 Impact**: Cleaner controllers, less boilerplate
+- **🔧 Auto-fix**: Replace int $id with type-hinted entity
+- **📊 Effort**: 2–5 min per controller method
 
-### 📊 Validation Enhancements
-- **Constraint Attributes**
-  - ✅ Use: Validation attributes on DTOs/entities
-  - ❌ Avoid: YAML/XML validation configuration where attributes work
-  - 📍 Detection: External validation files for simple constraints
-  - 🔧 Fix: Move to attribute-based validation
+### 🔐 Security Attributes Enhancement
+- **IsSecurity Attributes** ⭐ **SECURITY**
+  - ✅ Use: `#[IsGranted]`, `#[Security]` attributes
+  - ❌ Avoid: Avoid manual security checks
+  - 🔍 **Detection**: Pattern `/denyAccessUnlessGranted|isGrant\(ed\)/`
+  - 🚨 **Impact**: Code clarity, AOP benefits, caching
+  - 🔧 **AutoFix-fix**: Convert to attribute-based security
+  - 📊 **Effort**: 2–5 min per security check
 
-## 🔍 Detection Patterns for Changed Files Only
+### 📨 Event System Modernization
+#### AsEventListener Attribute
+- **✅ Use**: `#[AsEventListener]` for event subscribers
+  - ❌ Use:** Avoid: Manual event listener registration
+  - 🔍 **Detection**: Pattern `/implements\s+EventSubscriberInterface/`
+  - 🚨 **Impact**: Service container optimization, clarity
+  - 🔧 **Auto-fix**: Replace with attribute pattern
+  - 📊 **Effort**: 5–15 min per event listener
 
-### Files to Scrutinize in Diff:
-1. **Entities**: Look for old datetime types, missing modern mappings
-2. **Controllers**: Check for manual parameter extraction, missing security attributes
-3. **Services**: Verify modern dependency injection patterns
-4. **Commands**: Ensure modern attribute-based configuration
-5. **Event Listeners**: Check for attribute usage vs manual registration
-6. **Tests**: Validate modern testing patterns
+## 🎯 MEDIUM PRIORITY: Performance & Architecture
+### ⚡ Performance Optimizations
+#### Server-Sent Events (SSE)
+- **✅ Use**: `ServerEvent`, `EventStreamResponse`
+  - ❌ Avoid: Avoid custom streaming implementations
+  - 🔍 **Detection Pattern**: Custom event streaming code
+  - 🚨 **Impact**: Real-time features, resource usage
+  - 🔧 **Auto-fix**: Use built-in SSE classes
+  - 📊 **Effort**: 10–30 min per streaming endpoint
 
-### Code Patterns to Flag in Changed Code:
-\`\`\`php
-// ❌ Flag these patterns in diff
-new \DateTime()
-new \DateTimeImmutable()
-\$request->get('param')
-manual service configuration for simple cases
-extends EventSubscriberInterface without strong reason
-\$this->denyAccessUnlessGranted() in controllers
-datetime_immutable in Doctrine mappings
+### 🎛 Command Enhancements
+#### Invokable Commands with Attributes
+- **✅ Use**: Attribute-based command configuration
+- ** ❌ Avoid**: Traditional command registration
+- **🔍 Detection Pattern**: `/extends\s+Command.*configure\(/`
+- **🚨 Impact**: Code clarity, argument validation
+- **🔧 Auto-fix**: Convert to invokable with attributes
+- **📊 Effort**: 5–15 min per command
 
-// ✅ Suggest these instead
-DatePoint::createFromFormat()
-#[MapRequestPayload]
-#[IsGranted('ROLE_USER')]
-#[AsEventListener]
-DatePointType in Doctrine
-\`\`\`
-FEATURES
+## 🎯 LOW PRIORITY: Nice-to-Have Improvements
+### 📊 Enhanced Validation
+#### Modern Constraint Attributes
+- **✅ Use**: Validation attributes on DTOs/entities
+- **❌ Avoid**: YAML/XML validation where attributes work
+- **🔍 Detection Pattern**: External validation files
+- **🚨 Impact**: Maintainability, co-location
+- **🔧 Auto-fix**: Move to attribute-based validation
+- **📊 Effort**: 5–20 min per validation group
 
-        log_success "Symfony features matrix generated -> $FEATURES_MATRIX"
-    fi
+### 🧪 Testing Modernization
+#### Modern Test Attributes
+- **✅ Use**: Latest PHPUnit and Symfony test attributes
+- **❌ Avoid**: Deprecated testing patterns
+- **🔍 Detection Pattern**: Old test method patterns
+- **🚨 Impact**: Test reliability, maintenance
+- **🔧 Auto-fix**: Update to modern testing approach
+- **📊 Effort**: 2–10 min per test class
+
+## 🚨 ANTI-PATTERNS TO AVOID
+### ❌ Legacy DateTime Usage
+```php
+// 🚫️ CRITICAL: Avoid these patterns
+new DateTime('now')
+new DateTime('now')
+new DateTimeImmutable()
+$date->format('Y-m-d H:i:s')
+
+// ✅ MODERN: Use these instead
+DatePoint::createFromFormat('Y-m-d H:i:s', 'now')
+$datePoint->format(DatePoint::ISO8601)
+```
+
+### ❌ Manual Entity Lookups
+```php
+// 🚫 LEGACY: Manual entity lookup
+#[Route('/{id}/update-client', name: 'app_clientservice_update_client')]
+public function updateClient(Request $request, int $id): JsonResponse
+{
+    $clientService = $this->repository->find($id);
+    // ... logic ...
 }
 
-generate_features_matrix
+// ✅ MODERN: Entity injection
+#[Route('/{clientService}/update-client', name: 'app_clientservice_update_client')]
+public function updateClient(Request $request, ClientService $clientService): JsonResponse
+{
+    // ... logic ...
+}
+```
+
+### ❌ Manual Parameter Handling
+```php
+// 🚫 LEGACY: Manual parameter extraction
+public function create(Request $request): Response
+{
+    $data = $request->get('data');
+    $validated = $this->validator->validate($data);
+}
+
+// ✅ MODERN: Automatic mapping
+public function create(#[MapRequestPayload] CreateUserDTO $dto): Response
+{
+    // $dto is automatically validated
+}
+```
+
+### ❌ Manual Security Checks
+```php
+// 🚫 LEGACY: Manual security
+public function admin(): Response
+{
+    $this->denyAccessUnlessGrant('ROLE_ADMIN');
+    // ...
+}
+
+// ✅ MODERN: Declarative security
+#[IsGrant('ROLE_ADMIN')]
+public function admin(): Response
+{
+    // ...
+}
+```
+
+## 🔍 **AUTO-DETECTION RULES FOR CHANGED FILES**
+### Pattern Matching Rules
+1. **DateTime**: `/new\s+(DateTime|DateTimeImmutable)/`
+2. **Request Handling**: `/\\$request->(get|query|request)\s*\(/`
+3. **Manual Security**: `/(denyAccessUnlessGrant|is.*Grant\)\s*\(/`
+4. **Event Subscribers**: `/implements\s+EventSubscriberInterface/`
+5. **Manual Validation**: `/\\$validator->validate\s*\(/`
+6. **Manual Entity Lookup**: `Route.*{id}.*int\s+\$id.*repository->find`
+
+### Severity Levels
+- **🚨 Critical**: Breaks compatibility, security risks
+- **⚠️ Major**: Performance or DX impact
+- **💡 Minor**: Code quality improvements
+
+### Impact Assessment
+- **Breaking Change Risk**: Future version upgrade issues
+- **Performance Impact**: Resource efficiency
+- **Developer Experience**: Maintainability
+- **Security Implications**: Vulnerability risks
+FEATURES
+    log_success "Enhanced features matrix generated -> $VSCODE_DIR/symfony-features-matrix.md"
+}
 
 # === Step 2: Fetch and Generate Diff with Changed Files Analysis ===
 log_info "Fetching latest changes from origin..."
@@ -612,6 +688,7 @@ fi)
 
 #### 2. 🆕 **Modern Symfony Features in Changes** (HIGH PRIORITY)
 - **DatePoint Integration**: New datetime handling uses DatePoint
+- **Parameter conversion**
 - **Security Attributes**: New controllers use modern security attributes
 - **Parameter Mapping**: New request handling uses modern mapping
 - **Event System**: New event handling uses attributes
