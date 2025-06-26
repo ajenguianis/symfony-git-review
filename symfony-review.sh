@@ -2,17 +2,17 @@
 
 # ========================================
 # Symfony Git Diff Review Script
-# Enhanced Code Quality & Architecture Review with Symfony 7.3+ Priority
-# Context-Aware Analysis: Check only diff changes with global project awareness
+# Context-Aware Code Review with Flexible Version Support
 # Author: Anis Ajengui
-# Version: 1.4 - Enhanced with Context-Aware Analysis
+# Version: 1.4.4 - Added support for older Symfony/PHP versions
 # ========================================
 
 set -euo pipefail
 
 # === Configuration ===
-SYMFONY_VERSION="${SYMFONY_VERSION:-7.3}"
-PHP_VERSION="${PHP_VERSION:-8.4}"
+CONFIG_FILE=".vscode/review-config.json"
+SYMFONY_VERSION="7.3" # Default, overridden by config or detection
+PHP_VERSION="8.4"     # Default, overridden by config or detection
 BASE_BRANCH="origin/main"
 FEATURE_BRANCH=""
 SHOW_REVIEW=false
@@ -42,7 +42,20 @@ COMMENTS_DELIVERABLE="$VSCODE_DIR/review-comments-deliverable.md"
 CONFIG_FILE="$VSCODE_DIR/review-config.json"
 FEATURES_MATRIX="$VSCODE_DIR/symfony-features-matrix.md"
 
-# === Functions ===
+# === Version-Specific Documentation URLs ===
+get_symfony_doc_url() {
+    local version="$1"
+    local major_minor=$(echo "$version" | cut -d. -f1,2)
+    echo "https://symfony.com/doc/$major_minor"
+}
+
+get_php_doc_url() {
+    local version="$1"
+    local major_minor=$(echo "$version" | cut -d. -f1,2)
+    echo "https://www.php.net/manual/en/migration${major_minor//./}.php"
+}
+
+# === Logging Functions ===
 log_info() {
     echo -e "${BLUE}ℹ️  $1${NC}"
 }
@@ -70,9 +83,46 @@ log_feature() {
     echo -e "${CYAN}🆕 $1${NC}"
 }
 
+# === Load Version Config ===
+load_version_config() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log_warning "First-time setup: Configure project versions"
+        
+        SYMFONY_DETECTED=$(grep -oP '"name": "symfony/framework-bundle",\s*"version": "\K[\d.]+' composer.lock 2>/dev/null || echo "7.3")
+        PHP_DETECTED=$(grep -oP '"php": "\K[\d.]+' composer.json 2>/dev/null || php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
+        
+        read -p "Enter Symfony version [${SYMFONY_DETECTED}]: " symfony_ver
+        read -p "Enter PHP version [${PHP_DETECTED}]: " php_ver
+        
+        SYMFONY_VERSION="${symfony_ver:-${SYMFONY_DETECTED}}"
+        PHP_VERSION="${php_ver:-${PHP_DETECTED}}"
+        
+        jq -n --arg sv "$SYMFONY_VERSION" \
+              --arg pv "$PHP_VERSION" \
+              '{ "symfony_version": $sv, "php_version": $pv }' > "$CONFIG_FILE"
+        
+        log_success "Configuration saved to $CONFIG_FILE"
+    else
+        SYMFONY_VERSION="$(jq -r .symfony_version "$CONFIG_FILE" 2>/dev/null || echo "7.3")"
+        PHP_VERSION="$(jq -r .php_version "$CONFIG_FILE" 2>/dev/null || echo "8.4")"
+    fi
+    
+    # Validate versions
+    if [[ ! "$SYMFONY_VERSION" =~ ^[5-7]\.[0-9]+(\.[0-9]+)?$ ]]; then
+        log_error "Invalid Symfony version: $SYMFONY_VERSION (must be ≥ 5.4)"
+    fi
+    if [[ ! "$PHP_VERSION" =~ ^[7-8]\.[0-9]+(\.[0-9]+)?$ ]]; then
+        log_error "Invalid PHP version: $PHP_VERSION (must be ≥ 7.4)"
+    fi
+    
+    SYMFONY_DOC_URL=$(get_symfony_doc_url "$SYMFONY_VERSION")
+    PHP_DOC_URL=$(get_php_doc_url "$PHP_VERSION")
+}
+
+# === Show Usage ===
 show_usage() {
     cat << USAGE
-🎯 Symfony Git Diff Review Script v1.4 - Context-Aware Analysis
+🎯 Symfony Git Diff Review Script v1.4.4 - Context-Aware Analysis
 
 Usage: $0 <feature-branch> [options]
 
@@ -84,7 +134,7 @@ Options:
   --show            Show review output after generation
   --verbose         Enable verbose output
   --no-context      Skip project context scanning
-  --no-latest       Disable latest Symfony features prioritization
+  --latest          Enable latest Symfony features prioritization
   --ai PROVIDER     AI provider: copilot|claude|gpt (default: copilot)
   --help            Show this help message
 
@@ -94,14 +144,14 @@ Examples:
   $0 hotfix/security-fix --base origin/develop --ai claude
 
 📁 All files are generated in .vscode/ directory (git-ignored)
-🆕 NEW: Context-aware analysis - reviews only diff changes with global project awareness
+🆕 NEW: Supports Symfony ≥ 5.4 and PHP ≥ 7.4
 USAGE
 }
 
 # === Dependency Check ===
 check_dependencies() {
     log_verbose "Checking dependencies..."
-    for cmd in git jq; do
+    for cmd in git jq bc; do
         if ! command -v "$cmd" &>/dev/null; then
             log_error "Required dependency '$cmd' not found. Install it using: sudo apt install $cmd"
         fi
@@ -113,400 +163,245 @@ check_dependencies() {
     fi
 }
 
-check_dependencies
-
-# === Early Argument Validation ===
-if [[ $# -eq 0 ]]; then
-    log_error "No arguments provided"
-    show_usage
-    exit 1
-fi
-
 # === Parse Arguments ===
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --base)
-            if [[ -z "$2" ]]; then
-                log_error "--base requires a branch name"
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --base)
+                if [[ -z "$2" ]]; then
+                    log_error "--base requires a branch name"
+                fi
+                BASE_BRANCH="$2"
+                shift 2
+                ;;
+            --show)
+                SHOW_REVIEW=true
+                shift
+                ;;
+            --verbose)
+                VERBOSE=true
+                shift
+                ;;
+            --no-context)
+                SCAN_CONTEXT=false
+                shift
+                ;;
+            --latest)
+                PRIORITIZE_LATEST=true
+                shift
+                ;;
+            --ai)
+                if [[ -z "$2" ]]; then
+                    log_error "--ai requires a provider (copilot|claude|gpt)"
+                fi
+                AI_PROVIDER="$2"
+                shift 2
+                ;;
+            --help)
                 show_usage
-                exit 1
-            fi
-            BASE_BRANCH="$2"
-            shift 2
-            ;;
-        --show)
-            SHOW_REVIEW=true
-            shift
-            ;;
-        --verbose)
-            VERBOSE=true
-            shift
-            ;;
-        --no-context)
-            SCAN_CONTEXT=false
-            shift
-            ;;
-        --no-latest)
-            PRIORITIZE_LATEST=false
-            shift
-            ;;
-        --ai)
-            if [[ -z "$2" ]]; then
-                log_error "--ai requires a provider (copilot|claude|gpt)"
-                show_usage
-                exit 1
-            fi
-            AI_PROVIDER="$2"
-            shift 2
-            ;;
-        --help)
-            show_usage
-            exit 0
-            ;;
-        -*)
-            log_error "Unknown option: $1"
-            show_usage
-            exit 1
-            ;;
-        *)
-            if [ -z "$FEATURE_BRANCH" ]; then
-                FEATURE_BRANCH="$1"
-            else
-                log_error "Unexpected argument: $1"
-                show_usage
-                exit 1
-            fi
-            shift
-            ;;
-    esac
-done
-
-# === Validation ===
-if [ -z "$FEATURE_BRANCH" ]; then
-    log_error "Feature branch is required"
-    show_usage
-    exit 1
-fi
-
-# Check if we're in a git repository
-if ! git rev-parse --git-dir &>/dev/null; then
-    log_error "Not in a git repository"
-    exit 1
-fi
-
-# Check if feature branch exists
-if ! git rev-parse --verify "$FEATURE_BRANCH" &>/dev/null; then
-    log_error "Feature branch '$FEATURE_BRANCH' does not exist"
-    exit 1
-fi
-
-# Create .vscode directory
-mkdir -p "$VSCODE_DIR"
-
-# === Step 1: Generate Symfony Features Matrix ===
-generate_enhanced_features_matrix() {
-    if ! $PRIORITIZE_LATEST; then
-        return; fi
-    log_feature "Generating enhanced Symfony 7.3+ matrix..."
-    cat > "$VSCODE_DIR/symfony-features-matrix.md" << FEATURES
-# 🆕 Symfony 7.3+ Features Priority Matrix - Enhanced
-
-## 🎯 CRITICAL PRIORITY: Immediate Action Required
-### ⏰ Date/Time Handling (Breaking Change Potential)
-- **DatePoint over DateTimeImmutable** ⭐ **HIGH IMPACT**
-  - ✅ Use: `Symfony\Component\Clock\DatePoint`
-  - ❌ Avoid: Avoid `DateTimeImmutable`, `DateTime`
-  - 🔍 **Detection Pattern**: `/new\s+(DateTime|DateTimeImmutable)/`
-  - 🚨 **Impact**: Clock component integration, timezone handling
-  - 🔧 **Auto-fix**: `DatePoint::createFromFormat()`
-  - 📊 **Effort**: 2–5 min per occurrence
-
-### 🗄️ Doctrine DatePoint Integration
-- **✅ Use**: `DatePointType` in ORM mappings
-- **❌ Avoid**: `datetime_immutable` type
-- **🔍 Detection Pattern**: `/#\[ORM\\Column.*datetime_immutable/`
-- **🚨 Impact**: Database consistency, serialization
-- **🔧 Auto-fix**: Update Column type to DatePointType
-- **📊 Effort**: 1–2 min per field
-
-## 🎯 HIGH PRIORITY: Modern Development Experience
-### 🚀 Enhanced Parameter Mapping
-- **MapRequestPayload & MapQueryString** ⭐ **DX IMPROVEMENT**
-  - ✅ Use: Modern request parameter mapping
-  - ❌ Avoid: Avoid manual parameter extraction
-  - 🔍 Detection: Pattern `/\\$request\\->(get|query->get|request->get)/`
-  - 🚨 **Impact**: Type safety, validation, performance
-  - 🔧 **Auto-fix**: `#[MapRequestPayload]` attribute
-  - 📊 **Effort**: 3–10 min per controller action
-
-### 🔁 Automatic Entity Injection
-#### Entity Injection in Routes
-- **✅ Use**: Type-hinted entities as controller arguments
-- **❌ Avoid**: Manual entity lookups using repository
-- **🔍 Detection Pattern**: `Route.*{id}.*int\s+\$id.*repository`
-- **🚨 Impact**: Cleaner controllers, less boilerplate
-- **🔧 Auto-fix**: Replace int $id with type-hinted entity
-- **📊 Effort**: 2–5 min per controller method
-
-### 🔐 Security Attributes Enhancement
-- **IsSecurity Attributes** ⭐ **SECURITY**
-  - ✅ Use: `#[IsGranted]`, `#[Security]` attributes
-  - ❌ Avoid: Avoid manual security checks
-  - 🔍 **Detection**: Pattern `/denyAccessUnlessGranted|isGrant\(ed\)/`
-  - 🚨 **Impact**: Code clarity, AOP benefits, caching
-  - 🔧 **AutoFix-fix**: Convert to attribute-based security
-  - 📊 **Effort**: 2–5 min per security check
-
-### 📨 Event System Modernization
-#### AsEventListener Attribute
-- **✅ Use**: `#[AsEventListener]` for event subscribers
-  - ❌ Use:** Avoid: Manual event listener registration
-  - 🔍 **Detection**: Pattern `/implements\s+EventSubscriberInterface/`
-  - 🚨 **Impact**: Service container optimization, clarity
-  - 🔧 **Auto-fix**: Replace with attribute pattern
-  - 📊 **Effort**: 5–15 min per event listener
-
-## 🎯 MEDIUM PRIORITY: Performance & Architecture
-### ⚡ Performance Optimizations
-#### Server-Sent Events (SSE)
-- **✅ Use**: `ServerEvent`, `EventStreamResponse`
-  - ❌ Avoid: Avoid custom streaming implementations
-  - 🔍 **Detection Pattern**: Custom event streaming code
-  - 🚨 **Impact**: Real-time features, resource usage
-  - 🔧 **Auto-fix**: Use built-in SSE classes
-  - 📊 **Effort**: 10–30 min per streaming endpoint
-
-### 🎛 Command Enhancements
-#### Invokable Commands with Attributes
-- **✅ Use**: Attribute-based command configuration
-- ** ❌ Avoid**: Traditional command registration
-- **🔍 Detection Pattern**: `/extends\s+Command.*configure\(/`
-- **🚨 Impact**: Code clarity, argument validation
-- **🔧 Auto-fix**: Convert to invokable with attributes
-- **📊 Effort**: 5–15 min per command
-
-## 🎯 LOW PRIORITY: Nice-to-Have Improvements
-### 📊 Enhanced Validation
-#### Modern Constraint Attributes
-- **✅ Use**: Validation attributes on DTOs/entities
-- **❌ Avoid**: YAML/XML validation where attributes work
-- **🔍 Detection Pattern**: External validation files
-- **🚨 Impact**: Maintainability, co-location
-- **🔧 Auto-fix**: Move to attribute-based validation
-- **📊 Effort**: 5–20 min per validation group
-
-### 🧪 Testing Modernization
-#### Modern Test Attributes
-- **✅ Use**: Latest PHPUnit and Symfony test attributes
-- **❌ Avoid**: Deprecated testing patterns
-- **🔍 Detection Pattern**: Old test method patterns
-- **🚨 Impact**: Test reliability, maintenance
-- **🔧 Auto-fix**: Update to modern testing approach
-- **📊 Effort**: 2–10 min per test class
-
-## 🚨 ANTI-PATTERNS TO AVOID
-### ❌ Legacy DateTime Usage
-```php
-// 🚫️ CRITICAL: Avoid these patterns
-new DateTime('now')
-new DateTime('now')
-new DateTimeImmutable()
-$date->format('Y-m-d H:i:s')
-
-// ✅ MODERN: Use these instead
-DatePoint::createFromFormat('Y-m-d H:i:s', 'now')
-$datePoint->format(DatePoint::ISO8601)
-```
-
-### ❌ Manual Entity Lookups
-```php
-// 🚫 LEGACY: Manual entity lookup
-#[Route('/{id}/update-client', name: 'app_clientservice_update_client')]
-public function updateClient(Request $request, int $id): JsonResponse
-{
-    $clientService = $this->repository->find($id);
-    // ... logic ...
+                exit 0
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                ;;
+            *)
+                if [ -z "$FEATURE_BRANCH" ]; then
+                    FEATURE_BRANCH="$1"
+                else
+                    log_error "Unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
 }
 
-// ✅ MODERN: Entity injection
-#[Route('/{clientService}/update-client', name: 'app_clientservice_update_client')]
-public function updateClient(Request $request, ClientService $clientService): JsonResponse
-{
-    // ... logic ...
-}
-```
-
-### ❌ Manual Parameter Handling
-```php
-// 🚫 LEGACY: Manual parameter extraction
-public function create(Request $request): Response
-{
-    $data = $request->get('data');
-    $validated = $this->validator->validate($data);
+# === Validate Arguments ===
+validate_arguments() {
+    if [ -z "$FEATURE_BRANCH" ]; then
+        log_error "Feature branch is required"
+    fi
+    
+    if ! git rev-parse --git-dir &>/dev/null; then
+        log_error "Not in a git repository"
+    fi
+    
+    if ! git rev-parse --verify "$FEATURE_BRANCH" &>/dev/null; then
+        log_error "Feature branch '$FEATURE_BRANCH' does not exist"
+    fi
 }
 
-// ✅ MODERN: Automatic mapping
-public function create(#[MapRequestPayload] CreateUserDTO $dto): Response
-{
-    // $dto is automatically validated
-}
-```
+# === Generate Features Matrix ===
+generate_features_matrix() {
+    log_feature "Generating features matrix for Symfony $SYMFONY_VERSION and PHP $PHP_VERSION..."
+    local symfony_major_minor=$(echo "$SYMFONY_VERSION" | cut -d. -f1,2)
+    local php_major_minor=$(echo "$PHP_VERSION" | cut -d. -f1,2)
+    
+    cat > "$FEATURES_MATRIX" << FEATURES
+# 🆕 Symfony $SYMFONY_VERSION & PHP $PHP_VERSION Features Matrix
 
-### ❌ Manual Security Checks
-```php
-// 🚫 LEGACY: Manual security
-public function admin(): Response
-{
-    $this->denyAccessUnlessGrant('ROLE_ADMIN');
-    // ...
-}
+## 🎯 Version-Specific Guidelines
+- **Symfony Documentation**: [$symfony_major_minor]($SYMFONY_DOC_URL)
+- **PHP Migration Guide**: [$php_major_minor]($PHP_DOC_URL)
+- **Version Focus**: Symfony $SYMFONY_VERSION and PHP $PHP_VERSION
 
-// ✅ MODERN: Declarative security
-#[IsGrant('ROLE_ADMIN')]
-public function admin(): Response
-{
-    // ...
-}
-```
+## 🚨 Critical Checks
+### PHP $PHP_VERSION Features
+$(if [[ "$php_major_minor" > "7.4" || "$php_major_minor" == "7.4" ]]; then
+    echo "- ✅ Strict Types: Supported (declare(strict_types=1))"
+    echo "- ✅ Arrow Functions: Supported"
+fi)
+$(if [[ "$php_major_minor" > "8.0" || "$php_major_minor" == "8.0" ]]; then
+    echo "- ✅ Union Types: Supported"
+    echo "- ✅ Named Arguments: Supported"
+    echo "- ✅ Attributes: Supported"
+fi)
+$(if [[ "$php_major_minor" > "8.1" || "$php_major_minor" == "8.1" ]]; then
+    echo "- ✅ Readonly Properties: Supported"
+    echo "- ✅ Enums: Supported"
+fi)
+$(if [[ "$php_major_minor" > "8.4" || "$php_major_minor" == "8.4" ]]; then
+    echo "- ✅ Property Hooks: Supported"
+    echo "- ✅ Asymmetric Visibility: Supported"
+    echo "- ✅ New Array Functions: Supported (e.g., array_find)"
+fi)
 
-## 🔍 **AUTO-DETECTION RULES FOR CHANGED FILES**
-### Pattern Matching Rules
-1. **DateTime**: `/new\s+(DateTime|DateTimeImmutable)/`
-2. **Request Handling**: `/\\$request->(get|query|request)\s*\(/`
-3. **Manual Security**: `/(denyAccessUnlessGrant|is.*Grant\)\s*\(/`
-4. **Event Subscribers**: `/implements\s+EventSubscriberInterface/`
-5. **Manual Validation**: `/\\$validator->validate\s*\(/`
-6. **Manual Entity Lookup**: `Route.*{id}.*int\s+\$id.*repository->find`
+### Symfony $SYMFONY_VERSION Features
+$(if [[ "$symfony_major_minor" > "5.4" || "$symfony_major_minor" == "5.4" ]]; then
+    echo "- ✅ Modern Directory Structure: Supported"
+    echo "- ✅ SymfonyStyle: Use for console output"
+fi)
+$(if [[ "$symfony_major_minor" > "6.0" || "$symfony_major_minor" == "6.0" ]]; then
+    echo "- ✅ Native Attributes: Supported (e.g., #[Route])"
+fi)
+$(if [[ "$symfony_major_minor" > "6.2" || "$symfony_major_minor" == "6.2" ]]; then
+    echo "- ✅ MapRequestPayload: Use #[MapRequestPayload]"
+    echo "- ✅ AsConsoleCommand: Use #[AsConsoleCommand]"
+fi)
+$(if [[ "$symfony_major_minor" > "7.3" || "$symfony_major_minor" == "7.3" ]]; then
+    echo "- ✅ DatePoint: Use Symfony\Component\Clock\DatePoint"
+    echo "- ✅ AsEventListener: Use #[AsEventListener]"
+fi)
 
-### Severity Levels
-- **🚨 Critical**: Breaks compatibility, security risks
-- **⚠️ Major**: Performance or DX impact
-- **💡 Minor**: Code quality improvements
+## 🔍 Detection Patterns
+### PHP Incompatible Patterns
+$(if [[ "$php_major_minor" < "8.0" ]]; then
+    echo "- Union Types: type1|type2"
+    echo "- Named Arguments: func(arg: value)"
+fi)
+$(if [[ "$php_major_minor" < "8.1" ]]; then
+    echo "- Readonly Properties: readonly string \$prop"
+    echo "- Match Expression: match(\$value) { ... }"
+fi)
+$(if [[ "$php_major_minor" < "8.4" ]]; then
+    echo "- Property Hooks: public \$prop { get => ...; }"
+    echo "- Asymmetric Visibility: public(private(set)) \$prop"
+fi)
 
-### Impact Assessment
-- **Breaking Change Risk**: Future version upgrade issues
-- **Performance Impact**: Resource efficiency
-- **Developer Experience**: Maintainability
-- **Security Implications**: Vulnerability risks
+### Symfony Incompatible Patterns
+$(if [[ "$symfony_major_minor" < "6.0" ]]; then
+    echo "- Native Attributes: #[Route(...)]"
+fi)
+$(if [[ "$symfony_major_minor" < "6.2" ]]; then
+    echo "- MapRequestPayload: #[MapRequestPayload]"
+    echo "- AsConsoleCommand: #[AsConsoleCommand]"
+fi)
+$(if [[ "$symfony_major_minor" < "7.3" ]]; then
+    echo "- DatePoint: Symfony\Component\Clock\DatePoint"
+    echo "- AsEventListener: #[AsEventListener]"
+fi)
+
+## 🛠️ Recommendations
+- Use [Symfony $SYMFONY_VERSION Docs]($SYMFONY_DOC_URL)
+- Verify PHP $PHP_VERSION compatibility with [PHP $PHP_VERSION Migration]($PHP_DOC_URL)
+- Adopt version-appropriate console command practices
 FEATURES
-    log_success "Enhanced features matrix generated -> $VSCODE_DIR/symfony-features-matrix.md"
+    log_success "Features matrix generated -> $FEATURES_MATRIX"
 }
 
-# === Step 2: Fetch and Generate Diff with Changed Files Analysis ===
-log_info "Fetching latest changes from origin..."
-git fetch origin &>/dev/null || log_warning "Failed to fetch from origin"
+# === Generate Diff ===
+generate_diff() {
+    log_info "Fetching latest changes from origin..."
+    git fetch origin &>/dev/null || log_warning "Failed to fetch from origin"
+    
+    log_info "Generating diff between $BASE_BRANCH and $FEATURE_BRANCH..."
+    if ! git diff "$BASE_BRANCH...$FEATURE_BRANCH" --color-moved=default > "$DIFF_PATH"; then
+        log_error "Failed to generate diff"
+    fi
+    
+    if [ ! -s "$DIFF_PATH" ]; then
+        log_warning "No changes detected"
+        exit 0
+    fi
+    
+    log_info "Analyzing changed files..."
+    git diff --name-only "$BASE_BRANCH...$FEATURE_BRANCH" -- '*.php' '*.twig' '*.js' '*.css' '*.scss' > "$CHANGED_FILES_PATH"
+    CHANGED_FILES_COUNT=$(wc -l < "$CHANGED_FILES_PATH")
+    DIFF_SIZE=$(wc -l < "$DIFF_PATH")
+    
+    log_success "Git diff generated ($DIFF_SIZE lines, $CHANGED_FILES_COUNT files) -> $DIFF_PATH"
+    log_verbose "Changed files saved to -> $CHANGED_FILES_PATH"
+}
 
-log_info "Generating diff between $BASE_BRANCH and $FEATURE_BRANCH..."
-if ! git diff "$BASE_BRANCH...$FEATURE_BRANCH" --color-moved=default > "$DIFF_PATH"; then
-    log_error "Failed to generate diff"
-    exit 1
-fi
-
-if [ ! -s "$DIFF_PATH" ]; then
-    log_warning "No changes detected in $FEATURE_BRANCH relative to $BASE_BRANCH"
-    exit 0
-fi
-
-# Extract changed files and analyze them
-log_info "Analyzing changed files..."
-git diff --name-only "$BASE_BRANCH...$FEATURE_BRANCH" > "$CHANGED_FILES_PATH"
-CHANGED_FILES_COUNT=$(wc -l < "$CHANGED_FILES_PATH")
-DIFF_SIZE=$(wc -l < "$DIFF_PATH")
-
-log_success "Git diff generated ($DIFF_SIZE lines, $CHANGED_FILES_COUNT files) -> $DIFF_PATH"
-log_verbose "Changed files saved to -> $CHANGED_FILES_PATH"
-
-# === Step 3: Enhanced Context-Aware Project Analysis ===
+# === Scan Project Context ===
 scan_project_context() {
     log_info "Scanning global project context for architecture awareness..."
     
-    # Global project analysis for context
-    TOTAL_PHP_FILES=$(find src tests -name "*.php" 2>/dev/null | wc -l)
-    DATEPOINT_USAGE=$(find src -name "*.php" -exec grep -l "DatePoint" {} \; 2>/dev/null | wc -l)
-    DATETIME_USAGE=$(find src -name "*.php" -exec grep -l "DateTime" {} \; 2>/dev/null | wc -l)
-    SECURITY_ATTRIBUTES=$(find src -name "*.php" -exec grep -l "#\[IsGranted\]" {} \; 2>/dev/null | wc -l)
-    EVENT_ATTRIBUTES=$(find src -name "*.php" -exec grep -l "#\[AsEventListener\]" {} \; 2>/dev/null | wc -l)
+    TOTAL_PHP_FILES=$(find src tests -name "*.php" 2>/dev/null | wc -l || echo 0)
+    TOTAL_TWIG_FILES=$(find templates -name "*.twig" 2>/dev/null | wc -l || echo 0)
+    TOTAL_JS_FILES=$(find assets -name "*.js" 2>/dev/null | wc -l || echo 0)
+    TOTAL_CSS_FILES=$(find assets -name "*.css" -o -name "*.scss" 2>/dev/null | wc -l || echo 0)
     
     cat > "$CONTEXT_PATH" << CONTEXT
 # Global Project Context Analysis
 
-## Project Architecture Overview
-- **Total PHP Files**: $TOTAL_PHP_FILES
-- **Changed Files in Diff**: $CHANGED_FILES_COUNT
-- **Coverage**: $(echo "scale=2; $CHANGED_FILES_COUNT * 100 / $TOTAL_PHP_FILES" | bc 2>/dev/null || echo "N/A")% of codebase affected
+## Project Technology Stack
+- **Symfony Version**: $SYMFONY_VERSION
+- **PHP Version**: $PHP_VERSION
+- **Twig Files**: $TOTAL_TWIG_FILES
+- **JavaScript Files**: $TOTAL_JS_FILES
+- **CSS/SCSS Files**: $TOTAL_CSS_FILES
 
-## Modern Symfony Features Adoption (Global)
-- **DatePoint Usage**: $DATEPOINT_USAGE files (✅ Modern)
-- **DateTime Usage**: $DATETIME_USAGE files (⚠️ Legacy - should migrate to DatePoint)
-- **Security Attributes**: $SECURITY_ATTRIBUTES files (✅ Modern)
-- **Event Listener Attributes**: $EVENT_ATTRIBUTES files (✅ Modern)
+## Version Compatibility
+- **Target Versions**: Symfony $SYMFONY_VERSION ([Docs]($SYMFONY_DOC_URL)), PHP $PHP_VERSION ([Migration]($PHP_DOC_URL))
 
 ## Project Structure
 \`\`\`
-$(find src tests -type f -name "*.php" 2>/dev/null | head -20 | sort)
-$(if [ $(find src tests -type f -name "*.php" 2>/dev/null | wc -l) -gt 20 ]; then echo "... and $(( $(find src tests -type f -name "*.php" 2>/dev/null | wc -l) - 20 )) more files"; fi)
+$(find src tests templates assets -type f 2>/dev/null | head -20 | sort)
+$(if [ $(find src tests templates assets -type f 2>/dev/null | wc -l) -gt 20 ]; then echo "... and $(( $(find src tests templates assets -type f 2>/dev/null | wc -l) - 20 )) more files"; fi)
 \`\`\`
 
-## Symfony Version Detection
-$(if [ -f "composer.json" ]; then
-    SYMFONY_VERSION_DETECTED=$(grep -o '"symfony/framework-bundle": "[^"]*"' composer.json 2>/dev/null || echo "Not detected")
-    echo "**Detected Symfony Version**: $SYMFONY_VERSION_DETECTED"
-    echo "**Target Review Version**: $SYMFONY_VERSION"
-fi)
+## Technology Specifics
+### PHP $PHP_VERSION Features
+$(if [[ "$PHP_VERSION" > "7.4" || "$PHP_VERSION" == "7.4" ]]; then echo "- Strict types, arrow functions"; fi)
+$(if [[ "$PHP_VERSION" > "8.0" || "$PHP_VERSION" == "8.0" ]]; then echo "- Union types, named arguments, attributes"; fi)
+$(if [[ "$PHP_VERSION" > "8.1" || "$PHP_VERSION" == "8.1" ]]; then echo "- Readonly properties, enums"; fi)
+$(if [[ "$PHP_VERSION" > "8.4" || "$PHP_VERSION" == "8.4" ]]; then echo "- Property hooks, asymmetric visibility, new array functions"; fi)
 
-## Dependencies Analysis (composer.json)
-$(if [ -f "composer.json" ]; then
-    echo "\`\`\`json"
-    jq '.require + .["require-dev"] // {}' composer.json 2>/dev/null || cat composer.json | grep -A 50 '"require"'
-    echo "\`\`\`"
-else
-    echo "No composer.json found"
-fi)
+### Symfony $SYMFONY_VERSION Features
+$(if [[ "$SYMFONY_VERSION" > "5.4" || "$SYMFONY_VERSION" == "5.4" ]]; then echo "- Modern directory structure, SymfonyStyle for console"; fi)
+$(if [[ "$SYMFONY_VERSION" > "6.0" || "$SYMFONY_VERSION" == "6.0" ]]; then echo "- Native attributes (e.g., #[Route])"; fi)
+$(if [[ "$SYMFONY_VERSION" > "6.2" || "$SYMFONY_VERSION" == "6.2" ]]; then echo "- MapRequestPayload, AsConsoleCommand"; fi)
+$(if [[ "$SYMFONY_VERSION" > "7.3" || "$SYMFONY_VERSION" == "7.3" ]]; then echo "- DatePoint, AsEventListener"; fi)
 
-## Architecture Patterns (Global Context)
-### Service Layer Pattern Usage
-$(find src -path "*/Service/*" -name "*.php" 2>/dev/null | wc -l) service classes found
-### Repository Pattern Usage  
-$(find src -path "*/Repository/*" -name "*.php" 2>/dev/null | wc -l) repository classes found
-### Entity Pattern Usage
-$(find src -path "*/Entity/*" -name "*.php" 2>/dev/null | wc -l) entity classes found
-### Controller Pattern Usage
-$(find src -path "*/Controller/*" -name "*.php" 2>/dev/null | wc -l) controller classes found
+### Twig Features
+- Template inheritance, Symfony helpers
+$(if [[ "$SYMFONY_VERSION" > "6.0" || "$SYMFONY_VERSION" == "6.0" ]]; then echo "- Stimulus integration (if used)"; fi)
 
-## Legacy Pattern Detection (Global Awareness)
-$(echo "### Potential Legacy Patterns in Project:")
-$(find src -name "*.php" -exec grep -l "new.*DateTime" {} \; 2>/dev/null | wc -l) files with DateTime instances
-$(find src -name "*.php" -exec grep -l "denyAccessUnlessGranted" {} \; 2>/dev/null | wc -l) files with manual security checks
+### JavaScript Features
+- ES6 modules, arrow functions, DOM manipulation
 
-## Integration Points Analysis
-### Database Integration
-$(if [ -d "src/Entity" ]; then
-    echo "- Entities: $(find src/Entity -name "*.php" | wc -l) entity classes"
-    echo "- Datetime fields: $(find src/Entity -name "*.php" -exec grep -l "datetime" {} \; 2>/dev/null | wc -l) entities with datetime"
-fi)
-
-### External Service Integration
-$(if [ -f "composer.json" ]; then
-    echo "- HTTP Client: $(grep -c "symfony/http-client" composer.json 2>/dev/null || echo "0") references"
-    echo "- Mailer: $(grep -c "symfony/mailer" composer.json 2>/dev/null || echo "0") references"
-    echo "- Messenger: $(grep -c "symfony/messenger" composer.json 2>/dev/null || echo "0") references"
-fi)
-
-## Testing Infrastructure
-$(if [ -d "tests" ]; then
-    echo "- Test files: $(find tests -name "*.php" | wc -l)"
-    echo "- Unit tests: $(find tests -path "*/Unit/*" -name "*.php" 2>/dev/null | wc -l)"
-    echo "- Integration tests: $(find tests -path "*/Integration/*" -name "*.php" 2>/dev/null | wc -l)"
-    echo "- Functional tests: $(find tests -path "*/Functional/*" -name "*.php" 2>/dev/null | wc -l)"
-fi)
+### CSS/SCSS Features
+- CSS variables, SCSS mixins, modern properties
 CONTEXT
-
     log_success "Global project context analyzed -> $CONTEXT_PATH"
 }
 
 # === Analyze Diff Context ===
 analyze_diff_context() {
     log_info "Analyzing diff-specific context and integration points..."
+    local symfony_major_minor=$(echo "$SYMFONY_VERSION" | cut -d. -f1,2)
+    local php_major_minor=$(echo "$PHP_VERSION" | cut -d. -f1,2)
     
     cat > "$DIFF_CONTEXT_PATH" << DIFF_CONTEXT
 # Diff-Specific Context Analysis
@@ -517,137 +412,142 @@ $(cat "$CHANGED_FILES_PATH")
 \`\`\`
 
 ## File Type Distribution
-$(echo "### Changed File Categories:")
-$(grep -c "Controller" "$CHANGED_FILES_PATH" 2>/dev/null || echo "0") Controllers
-$(grep -c "Entity" "$CHANGED_FILES_PATH" 2>/dev/null || echo "0") Entities  
-$(grep -c "Service" "$CHANGED_FILES_PATH" 2>/dev/null || echo "0") Services
-$(grep -c "Repository" "$CHANGED_FILES_PATH" 2>/dev/null || echo "0") Repositories
-$(grep -c "Command" "$CHANGED_FILES_PATH" 2>/dev/null || echo "0") Commands
-$(grep -c "EventListener\|EventSubscriber" "$CHANGED_FILES_PATH" 2>/dev/null || echo "0") Event Handlers
-$(grep -c "Test" "$CHANGED_FILES_PATH" 2>/dev/null || echo "0") Tests
-$(grep -c "config\|\.yaml\|\.yml" "$CHANGED_FILES_PATH" 2>/dev/null || echo "0") Configuration files
+- PHP Files: $(grep -c "\.php$" "$CHANGED_FILES_PATH" 2>/dev/null || echo "0")
+- Twig Files: $(grep -c "\.twig$" "$CHANGED_FILES_PATH" 2>/dev/null || echo "0")
+- JavaScript Files: $(grep -c "\.js$" "$CHANGED_FILES_PATH" 2>/dev/null || echo "0")
+- CSS/SCSS Files: $(grep -c "\.css$\|\.scss$" "$CHANGED_FILES_PATH" 2>/dev/null || echo "0")
 
-## Integration Impact Analysis
-### Dependencies of Changed Files
+## Version-Specific Checks
 $(while IFS= read -r file; do
-    if [[ -f "$file" && "$file" == *.php ]]; then
-        echo "#### $file"
-        # Extract use statements to understand dependencies
-        grep "^use " "$file" 2>/dev/null | head -5 | sed 's/^/- /' || echo "- No use statements found"
+    if [[ -f "$file" ]]; then
+        echo "### $file"
+        
+        # PHP checks
+        if [[ "$file" == *.php ]]; then
+            if [[ "$php_major_minor" > "8.4" || "$php_major_minor" == "8.4" ]] && grep -q "public \$[a-zA-Z0-9_]* { get =>" "$file"; then
+                echo "- ✅ PHP $PHP_VERSION: Property hooks detected"
+            elif [[ "$php_major_minor" < "8.4" ]] && grep -q "public \$[a-zA-Z0-9_]* { get =>" "$file"; then
+                echo "- ❌ PHP $PHP_VERSION: Property hooks not supported"
+            fi
+            if [[ "$php_major_minor" < "8.1" ]] && grep -q "match(" "$file"; then
+                echo "- ❌ PHP $PHP_VERSION: Match expression not supported"
+            fi
+            if grep -q "declare(strict_types=1)" "$file"; then
+                echo "- ✅ Strict typing enabled"
+            fi
+            if grep -q "ini_set" "$file"; then
+                echo "- ⚠️ Resource configuration (ini_set) detected; review for production safety"
+            fi
+        fi
+        
+        # Symfony checks
+        if [[ "$file" == *.php ]]; then
+            if [[ "$symfony_major_minor" > "6.2" || "$symfony_major_minor" == "6.2" ]] && grep -q "#\[AsConsoleCommand\]" "$file"; then
+                echo "- ✅ Symfony $SYMFONY_VERSION: AsConsoleCommand detected"
+            elif [[ "$symfony_major_minor" < "6.2" ]] && grep -q "#\[AsConsoleCommand\]" "$file"; then
+                echo "- ❌ Symfony $SYMFONY_VERSION: AsConsoleCommand not supported"
+            fi
+            if [[ "$symfony_major_minor" > "6.2" || "$symfony_major_minor" == "6.2" ]] && grep -q "#\[MapRequestPayload\]" "$file"; then
+                echo "- ✅ Symfony $SYMFONY_VERSION: MapRequestPayload detected"
+            elif [[ "$symfony_major_minor" < "6.2" ]] && grep -q "#\[MapRequestPayload\]" "$file"; then
+                echo "- ❌ Symfony $SYMFONY_VERSION: MapRequestPayload not supported"
+            fi
+            if [[ "$symfony_major_minor" > "7.3" || "$symfony_major_minor" == "7.3" ]] && grep -q "Symfony\\Component\\Clock\\DatePoint" "$file"; then
+                echo "- ✅ Symfony $SYMFONY_VERSION: DatePoint detected"
+            elif [[ "$symfony_major_minor" < "7.3" ]] && grep -q "Symfony\\Component\\Clock\\DatePoint" "$file"; then
+                echo "- ❌ Symfony $SYMFONY_VERSION: DatePoint not supported"
+            fi
+        fi
+        
+        # Twig checks
+        if [[ "$file" == *.twig ]]; then
+            if grep -q "{% extends '" "$file"; then
+                echo "- ✅ Template inheritance"
+            fi
+            if [[ "$symfony_major_minor" > "6.0" || "$symfony_major_minor" == "6.0" ]] && grep -q "{{ stimulus_" "$file"; then
+                echo "- ✅ Stimulus integration"
+            fi
+            if grep -q "{% block.*%}.*{% endblock %}" "$file"; then
+                echo "- ✅ Proper block structure"
+            else
+                echo "- ⚠️ Missing or improper block structure"
+            fi
+        fi
+        
+        # JavaScript checks
+        if [[ "$file" == *.js ]]; then
+            if grep -q "import .* from" "$file"; then
+                echo "- ✅ ES6 module syntax"
+            fi
+            if grep -q "const .* =>" "$file"; then
+                echo "- ✅ Arrow functions"
+            fi
+            if grep -q "var " "$file"; then
+                echo "- ⚠️ Legacy var usage detected; prefer const/let"
+            fi
+        fi
+        
+        # CSS/SCSS checks
+        if [[ "$file" == *.css || "$file" == *.scss ]]; then
+            if grep -q "@mixin" "$file"; then
+                echo "- ✅ SCSS mixins"
+            fi
+            if grep -q "var(--" "$file"; then
+                echo "- ✅ CSS variables"
+            fi
+            if grep -q "!important" "$file"; then
+                echo "- ⚠️ Use of !important detected; consider alternatives"
+            fi
+        fi
+        
         echo ""
-    fi
-done < "$CHANGED_FILES_PATH")
-
-## Modern Feature Opportunities in Changed Files
-$(while IFS= read -r file; do
-    if [[ -f "$file" && "$file" == *.php ]]; then
-        echo "### $file - Modernization Opportunities"
-        
-        # Check for DateTime usage
-        if grep -q "DateTime" "$file" 2>/dev/null; then
-            echo "- ⚠️ DateTime usage found - consider DatePoint migration"
-        fi
-        
-        # Check for manual security
-        if grep -q "denyAccessUnlessGranted\|isGranted" "$file" 2>/dev/null; then
-            echo "- ⚠️ Manual security checks - consider #[IsGranted] attributes"
-        fi
-        
-        # Check for request parameter extraction
-        if grep -q "\$request->get\|\$request->query->get" "$file" 2>/dev/null; then
-            echo "- ⚠️ Manual parameter extraction - consider #[MapRequestPayload]"
-        fi
-        
-        # Check for event subscribers
-        if grep -q "EventSubscriberInterface" "$file" 2>/dev/null; then
-            echo "- ⚠️ Traditional event subscriber - consider #[AsEventListener]"
-        fi
-        
-        echo ""
-    fi
-done < "$CHANGED_FILES_PATH")
-
-## Architecture Integration Points
-### Service Layer Integration
-$(while IFS= read -r file; do
-    if [[ "$file" == *Service* && -f "$file" ]]; then
-        echo "- $file: $(grep -c "public function" "$file" 2>/dev/null || echo "0") public methods"
-    fi
-done < "$CHANGED_FILES_PATH")
-
-### Controller Layer Integration
-$(while IFS= read -r file; do
-    if [[ "$file" == *Controller* && -f "$file" ]]; then
-        echo "- $file: $(grep -c "public function.*Action\|#\[Route\]" "$file" 2>/dev/null || echo "0") endpoints"
-    fi
-done < "$CHANGED_FILES_PATH")
-
-### Data Layer Integration
-$(while IFS= read -r file; do
-    if [[ "$file" == *Entity* && -f "$file" ]]; then
-        echo "- $file: $(grep -c "#\[ORM" "$file" 2>/dev/null || echo "0") ORM annotations/attributes"
-    fi
-done < "$CHANGED_FILES_PATH")
-
-## Testing Impact
-### Test Coverage for Changed Files
-$(while IFS= read -r file; do
-    if [[ "$file" == *.php && "$file" != *Test* ]]; then
-        # Look for corresponding test file
-        test_file=$(echo "$file" | sed 's|src/|tests/|' | sed 's|\.php|Test.php|')
-        if [[ -f "$test_file" ]]; then
-            echo "✅ $file -> $test_file"
-        else
-            echo "⚠️ $file -> No test file found"
-        fi
     fi
 done < "$CHANGED_FILES_PATH")
 DIFF_CONTEXT
-
     log_success "Diff-specific context analyzed -> $DIFF_CONTEXT_PATH"
 }
 
-if $SCAN_CONTEXT; then
-    scan_project_context
-    analyze_diff_context
-fi
-
-# === Step 4: Generate Context-Aware Review Prompt ===
-log_info "Generating context-aware code review prompt..."
-
-cat > "$REVIEW_PROMPT" << PROMPT
-# 🔍 Context-Aware Symfony Code Review - Latest Features Priority
+# === Generate Review Prompt ===
+generate_review_prompt() {
+    log_info "Generating context-aware code review prompt..."
+    local symfony_major_minor=$(echo "$SYMFONY_VERSION" | cut -d. -f1,2)
+    local php_major_minor=$(echo "$PHP_VERSION" | cut -d. -f1,2)
+    
+    cat > "$REVIEW_PROMPT" << PROMPT
+# 🔍 Context-Aware Symfony Code Review - Symfony $SYMFONY_VERSION & PHP $PHP_VERSION
 
 ## 📋 Review Context
-- **Feature Branch:** \`$FEATURE_BRANCH\`
-- **Base Branch:** \`$BASE_BRANCH\`
-- **Target Symfony Version:** $SYMFONY_VERSION ⭐
-- **PHP Version:** $PHP_VERSION
-- **Lines Changed:** $DIFF_SIZE
-- **Files Changed:** $CHANGED_FILES_COUNT
-- **Latest Features Priority:** $(if $PRIORITIZE_LATEST; then echo "✅ ENABLED"; else echo "❌ DISABLED"; fi)
+- **Feature Branch**: \`$FEATURE_BRANCH\`
+- **Base Branch**: \`$BASE_BRANCH\`
+- **Target Versions**: Symfony $SYMFONY_VERSION ([Docs]($SYMFONY_DOC_URL)), PHP $PHP_VERSION ([Migration]($PHP_DOC_URL))
+- **Lines Changed**: $DIFF_SIZE
+- **Files Changed**: $CHANGED_FILES_COUNT
+- **Latest Features Priority**: $(if $PRIORITIZE_LATEST; then echo "✅ ENABLED"; else echo "❌ DISABLED"; fi)
+- **Primary File**: $(head -n 1 "$CHANGED_FILES_PATH" 2>/dev/null || echo "N/A")
 
 ---
 
-## 🚨 **CRITICAL: CONTEXT-AWARE ANALYSIS APPROACH**
+## 🚨 **CRITICAL: DOMAIN-DRIVEN, CONTEXT-AWARE ANALYSIS**
 
-**You are conducting a CONTEXT-AWARE code review with these MANDATORY principles:**
+**You are conducting a DOMAIN-DRIVEN, CONTEXT-AWARE code review with these MANDATORY principles:**
 
-### 🎯 **ANALYSIS SCOPE - STRICTLY ENFORCE**
-1. **ONLY REVIEW CHANGES**: Analyze ONLY the code changes in the git diff
-2. **USE GLOBAL CONTEXT**: Leverage project context to make informed architectural decisions
-3. **INTEGRATION FOCUS**: Ensure changes integrate well with existing codebase patterns
-4. **NO OUTSIDE SUGGESTIONS**: Do NOT suggest changes to files not in the diff
+### 🎯 **ANALYSIS SCOPE**
+1. **ONLY REVIEW CHANGES**: Focus exclusively on the git diff
+2. **LEVERAGE DOMAIN CONTEXT**: Align with CQRS and DDD patterns (commands, handlers, repositories)
+3. **ENSURE INTEGRATION**: Verify seamless integration with existing codebase
+4. **VERSION COMPATIBILITY**: Enforce Symfony $SYMFONY_VERSION and PHP $PHP_VERSION constraints
+5. **MULTI-LANGUAGE SUPPORT**: Review PHP, Twig, JavaScript (ES6), CSS/SCSS
 
-### 🔍 **CONTEXT-AWARE METHODOLOGY**
-- **Changed Files Analysis**: Focus review on the $(echo $CHANGED_FILES_COUNT) changed files
-- **Architecture Harmony**: Ensure changes align with existing project patterns
-- **Integration Points**: Verify proper integration with unchanged codebase
-- **Modern Feature Adoption**: Prioritize Symfony 7.3+ features in new/changed code
+### 🔍 **REVIEW METHODOLOGY**
+- **Changed Files**: Analyze the $CHANGED_FILES_COUNT changed file(s), particularly console commands
+- **CQRS Alignment**: Ensure commands follow established patterns (e.g., CreateEventCommand)
+- **Performance Focus**: Evaluate resource usage (memory, execution time)
+- **Security Posture**: Validate input handling and resource limits
+- **Version Checks**: Avoid features beyond Symfony $SYMFONY_VERSION and PHP $PHP_VERSION
 
 ---
 
-## 🏗️ **GLOBAL PROJECT CONTEXT** (For Reference Only)
+## 🏗️ **GLOBAL PROJECT CONTEXT**
 
 $(if $SCAN_CONTEXT && [ -f "$CONTEXT_PATH" ]; then
     cat "$CONTEXT_PATH"
@@ -656,57 +556,81 @@ fi)
 
 ---
 
-## 🔍 **DIFF-SPECIFIC CONTEXT** (Primary Analysis Target)
+## 🔍 **DIFF-SPECIFIC CONTEXT**
 
 $(if $SCAN_CONTEXT && [ -f "$DIFF_CONTEXT_PATH" ]; then
     cat "$DIFF_CONTEXT_PATH"
     echo ""
 fi)
 
+### 🛠️ **Command-Specific Analysis**
+- **File**: \`src/Contremarque/Command/CreateQuoteCommand.php\`
+- **Purpose**: Generates quote fixtures via Symfony console command
+- **Key Changes**: Commented out \`ini_set('memory_limit', '-1')\` and \`ini_set('max_execution_time', '0')\`
+- **Potential Concerns**:
+  - Resource management for fixture generation
+  - Lack of progress output for long-running tasks
+  - Input validation for command options
+
 ---
 
-## 🚨 **CRITICAL REVIEW CRITERIA FOR CHANGED CODE ONLY**
+## 🚨 **CRITICAL REVIEW CRITERIA**
 
-$(if $PRIORITIZE_LATEST && [ -f "$FEATURES_MATRIX" ]; then
+$(if [ -f "$FEATURES_MATRIX" ]; then
     cat "$FEATURES_MATRIX"
     echo ""
 fi)
 
-### 📊 **CONTEXT-AWARE SEVERITY CLASSIFICATION**
+### 📊 **SEVERITY CLASSIFICATION**
+- **🚨 CRITICAL**: Uses features beyond Symfony $SYMFONY_VERSION/PHP $PHP_VERSION, security risks, or CQRS violations
+- **⚠️ MAJOR**: Misses version-appropriate features or integration issues
+- **💡 MINOR**: Optimization opportunities within version constraints
 
-- **🚨 CRITICAL**: Changed code uses deprecated/legacy patterns when modern alternatives exist
-- **⚠️ MAJOR**: Changed code misses opportunities to use Symfony 7.3+ features or breaks architectural consistency
-- **💡 MINOR**: Changed code could be optimized or better integrated with existing patterns
+### 🔍 **REVIEW AREAS**
 
-### 🔍 **REVIEW AREAS (Context-Aware Priority Order)**
+#### 1. 🏗️ **CQRS & Architectural Integration** (HIGHEST PRIORITY)
+- **Command Patterns**: Align with existing commands (e.g., CreateEventCommand)
+- **Handler Integration**: Ensure command interacts with appropriate handlers
+- **Repository Usage**: Verify repository patterns (e.g., DoctrineORMEventRepository)
+- **DDD Principles**: Adhere to domain-driven design boundaries
 
-#### 1. 🏗️ **Architectural Integration** (HIGHEST PRIORITY)
-- **Consistency**: Changes align with existing architecture patterns
-- **Integration**: Proper integration with unchanged codebase components
-- **Service Interaction**: Changed services properly interact with existing ones
-- **Data Flow**: Changes maintain proper data flow patterns
+#### 2. 🆕 **Symfony $SYMFONY_VERSION & PHP $PHP_VERSION Features** (HIGH PRIORITY)
+$(if [[ "$symfony_major_minor" > "6.2" || "$symfony_major_minor" == "6.2" ]]; then
+    echo "- **Console Commands**: Use #[AsConsoleCommand] for declarative setup"
+    echo "- **MapRequestPayload**: Use #[MapRequestPayload] for DTO mapping"
+elif [[ "$symfony_major_minor" > "5.4" || "$symfony_major_minor" == "5.4" ]]; then
+    echo "- **Console Commands**: Use SymfonyStyle for output, configure via configure()"
+fi)
+$(if [[ "$symfony_major_minor" > "7.3" || "$symfony_major_minor" == "7.3" ]]; then
+    echo "- **DatePoint**: Use Symfony\Component\Clock\DatePoint for datetime"
+    echo "- **Event Listeners**: Use #[AsEventListener] for event handling"
+fi)
+$(if [[ "$php_major_minor" > "8.0" || "$php_major_minor" == "8.0" ]]; then
+    echo "- **Type Safety**: Use union types, named arguments"
+fi)
+$(if [[ "$php_major_minor" > "8.4" || "$php_major_minor" == "8.4" ]]; then
+    echo "- **Performance**: Use property hooks, new array functions"
+fi)
+- **Twig/JS/CSS**: Ensure version-appropriate practices (if applicable)
 
-#### 2. 🆕 **Modern Symfony Features in Changes** (HIGH PRIORITY)
-- **DatePoint Integration**: New datetime handling uses DatePoint
-- **Parameter conversion**
-- **Security Attributes**: New controllers use modern security attributes
-- **Parameter Mapping**: New request handling uses modern mapping
-- **Event System**: New event handling uses attributes
+#### 3. 🔒 **Security & Resource Management** (HIGH PRIORITY)
+- **Input Validation**: Sanitize command inputs/options
+- **Resource Limits**: Avoid unsafe \`ini_set\` calls
+- **Error Handling**: Robust exception management
 
-#### 3. 🔧 **Code Quality in Changes** (MEDIUM PRIORITY)
-- **SOLID Principles**: Changed code follows SOLID principles
-- **Type Safety**: New code uses proper typing
-- **Error Handling**: Appropriate exception handling in changes
-- **Performance**: Changed code doesn't introduce performance issues
+#### 4. 🔧 **Code Quality** (MEDIUM PRIORITY)
+- **SOLID Principles**: Ensure single responsibility, dependency inversion
+- **Readability**: Clear variable names, consistent formatting
+- **Performance**: Optimize loops, queries, and fixture generation
 
-#### 4. 🧪 **Testing Integration** (MEDIUM PRIORITY)
-- **Test Coverage**: Changes have appropriate test coverage
-- **Test Integration**: Tests integrate with existing test patterns
-- **Mock Compatibility**: New mocks work with existing test infrastructure
+#### 5. 🧪 **Testing Strategy** (MEDIUM PRIORITY)
+- **Unit Tests**: Cover command logic with PHPUnit
+- **Integration Tests**: Use KernelTestCase for console command testing
+- **Mocking**: Align mocks with existing test patterns
 
 ---
 
-## 📁 **GIT DIFF ANALYSIS** (PRIMARY FOCUS)
+## 📁 **GIT DIFF ANALYSIS**
 
 \`\`\`diff
 $(cat "$DIFF_PATH")
@@ -714,166 +638,153 @@ $(cat "$DIFF_PATH")
 
 ---
 
-## 🎯 **MANDATORY Context-Aware Review Format**
+## 🎯 **MANDATORY REVIEW FORMAT**
 
 ### 🔍 **Executive Summary**
-- **Context Integration Score**: X/10 (how well changes integrate with existing codebase)
-- **Modern Feature Adoption**: X/10 (Symfony 7.3+ feature usage in changes)
-- **Architectural Consistency**: X/10 (alignment with project patterns)
-- **Overall Assessment**: [Brief overview focused on integration and modernization]
+- **CQRS Integration Score**: X/10 (alignment with command patterns)
+- **Feature Adoption Score**: X/10 (use of Symfony $SYMFONY_VERSION/PHP $PHP_VERSION features)
+- **Performance Impact Score**: X/10 (resource usage efficiency)
+- **Security Posture Score**: X/10 (input validation, resource safety)
+- **Overall Assessment**: [Summary of integration, performance, and security]
 
-### ✅ **Well-Integrated Modern Changes**
-- List specific examples where changes properly integrate with existing code while using modern features
+**Scoring Rubric**:
+- 8–10: Excellent integration/feature use
+- 5–7: Moderate issues, addressable
+- 0–4: Critical flaws requiring immediate attention
 
-### 🚨 **Integration & Legacy Issues** (CRITICAL)
-- **Architecture Conflicts**: Changes that break existing patterns
-- **Legacy Pattern Introduction**: New code using outdated approaches
-- **Integration Problems**: Poor integration with existing components
+### ✅ **Well-Integrated Changes**
+- Examples of effective CQRS alignment and feature adoption
 
-### ⚠️ **Missed Integration Opportunities** (MAJOR)
-- **Modern Feature Adoption**: Where Symfony 7.3+ features could be used in changes
-- **Architecture Alignment**: Better integration with existing patterns
-- **Service Integration**: Improved service layer interaction
+### 🚨 **Critical Issues**
+- Use of features beyond Symfony $SYMFONY_VERSION/PHP $PHP_VERSION, CQRS violations, or security risks
 
-### 💡 **Context-Aware Optimizations** (MINOR)
-- Performance improvements considering existing codebase
-- Better integration patterns
-- Enhanced maintainability aligned with project structure
+### ⚠️ **Missed Opportunities**
+- Underutilized version-appropriate features
+- Integration or performance improvements
 
-### 🏗️ **Architectural Integration Feedback**
-- How changes affect overall architecture
-- Integration with existing services and components
-- Consistency with established patterns
+### 💡 **Optimizations**
+- Code readability, performance tweaks, test enhancements
 
-### 🔧 **Context-Aware Recommendations** 
-- Specific improvements for changed code considering project context
-- Modern feature adoption that makes sense for this project
-- Integration improvements
+### 🏗️ **CQRS & Architectural Feedback**
+- Impact on domain model and command handling
+- Integration with existing handlers/repositories
+
+### 🔒 **Security & Performance Feedback**
+- Resource management and input validation improvements
+- Performance optimization recommendations
 
 ---
 
-## 🚨 **DELIVERABLE: Context-Aware Review Comments**
+## 🚨 **DELIVERABLE: GitHub/GitLab-Ready Comments**
 
-**CRITICAL REQUIREMENT**: Every comment must:
-1. Focus ONLY on changed code in the diff
-2. Consider integration with existing project patterns
-3. Prioritize Symfony 7.3+ features where applicable
-4. Provide context-aware solutions
+**REQUIREMENTS**:
+1. Focus on diff changes only
+2. Enforce Symfony $SYMFONY_VERSION and PHP $PHP_VERSION compatibility
+3. Reference [Symfony $SYMFONY_VERSION Docs]($SYMFONY_DOC_URL) or [PHP $PHP_VERSION Migration]($PHP_DOC_URL)
+4. Provide actionable, CQRS-aligned solutions
 
-### 📝 **Comment Structure** (MANDATORY)
+### 📝 **Comment Structure**
 
 #### 🔍 Comment #[NUMBER]
-**File:** \`path/to/changed/file.php\` (MUST be from changed files list)
-**Line:** [EXACT_LINE_NUMBER_FROM_DIFF]  
-**Severity:** 🚨 Critical / ⚠️ Major / 💡 Minor  
-**Category:** [Integration|Modern Feature|Architecture|Legacy Pattern|Performance]
-**Context Impact:** [How this affects integration with existing codebase]
+**File**: \`path/to/changed/file\`  
+**Line**: [LINE_NUMBER]  
+**Severity**: 🚨 Critical / ⚠️ Major / 💡 Minor  
+**Category**: [CQRS|Security|Performance|PHP|Symfony|Testing]  
+**Version Check**: [Symfony $SYMFONY_VERSION|PHP $PHP_VERSION]  
 
-**Issue in Changed Code:**
-[Clear description focusing on the specific change and its integration impact]
+**Issue**:  
+[Description of issue, focusing on CQRS, security, or performance]  
 
-**Context-Aware Resolution:**
-[Solution considering existing project patterns and modern Symfony features]
+**Documentation**:  
+[Symfony $SYMFONY_VERSION Docs]($SYMFONY_DOC_URL/[path]) | [PHP $PHP_VERSION Migration]($PHP_DOC_URL)  
 
-**Integration Benefits:**
-[How the proposed change improves integration with existing codebase]
+**Resolution**:  
+[Actionable solution aligned with project context]  
 
-**Code Example:**
+**Example**:  
 \`\`\`php
-// ❌ Current change (problematic)
-[actual_changed_code_from_diff]
+// ❌ Problematic code
+[problematic_code]
 
-// ✅ Context-aware modern solution
-[improved_code_considering_project_context]
+// ✅ Optimized code
+[corrected_code]
 \`\`\`
 
-**Project Integration Notes:**
-- [How this integrates with existing services/components]
-- [Alignment with established patterns]
-- [Modern feature benefits in this project context]
-
-**Estimated Effort:** [Implementation time]
-**Integration Risk:** [Low/Medium/High - risk to existing functionality]
+**Estimated Effort**: [Time estimate]  
+**Risk**: [Low/Medium/High]  
 
 ---
 
-## 🎯 **STRICT ANALYSIS BOUNDARIES**
+## 🎯 **ANALYSIS BOUNDARIES**
 
-### ✅ **DO ANALYZE:**
-- Code changes in the git diff
-- Integration points with existing unchanged code
-- Modern feature opportunities in changed code
-- Architectural consistency of changes
+### ✅ **DO ANALYZE**:
+- Changes in the git diff
+- CQRS and DDD alignment
+- Security and performance of console commands
+- Symfony $SYMFONY_VERSION and PHP $PHP_VERSION compatibility
+- Testing strategy for commands
 
-### ❌ **DO NOT ANALYZE:**
-- Code conformity in unchanged files
-- Existing code not touched by the diff
-- Global refactoring suggestions outside the diff
-- Changes to files not in the changed files list
+### ❌ **DO NOT ANALYZE**:
+- Unchanged files
+- Global refactoring beyond the diff
+- Non-diff files
 
-### 🔍 **CONTEXT USAGE:**
-- Use global project context to make informed decisions about changes
-- Consider existing patterns when evaluating new code
-- Ensure changes don't break established architecture
-- Suggest modern features that fit the project context
-
----
-
-## 📋 **Context-Aware Success Criteria**
-
-The review MUST verify that changed code:
-- [ ] Integrates seamlessly with existing architecture
-- [ ] Uses Symfony 7.3+ features where applicable
-- [ ] Maintains consistency with project patterns
-- [ ] Doesn't introduce legacy patterns
-- [ ] Properly interacts with unchanged components
-- [ ] Follows established service/controller/entity patterns
-- [ ] Maintains or improves overall code quality
-
-**🚨 CRITICAL SUCCESS METRIC**: Changes must demonstrate context-aware modern Symfony development that enhances rather than disrupts the existing codebase.
-
-💡 **Remember**: You're reviewing CHANGES with full awareness of the project context, not auditing the entire codebase. Focus on making the new/changed code the best it can be within the project's established patterns and modern Symfony practices.
+### 🔍 **VERSION GUIDANCE**:
+- Use [Symfony $SYMFONY_VERSION Docs]($SYMFONY_DOC_URL)
+- Ensure PHP $PHP_VERSION compatibility ([Migration]($PHP_DOC_URL))
+- Align with CQRS patterns in project structure
 PROMPT
-
-log_success "Review prompt generated -> $REVIEW_PROMPT"
-
-# === Step 5: Generate Configuration ===
-log_info "Generating review configuration..."
-
-cat > "$CONFIG_FILE" << CONFIG
-{
-  "review_session": {
-    "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-    "feature_branch": "$FEATURE_BRANCH",
-    "base_branch": "$BASE_BRANCH",
-    "diff_lines": $DIFF_SIZE,
-    "changed_files_count": $CHANGED_FILES_COUNT,
-    "symfony_version": "$SYMFONY_VERSION",
-    "php_version": "$PHP_VERSION",
-    "context_scanned": $SCAN_CONTEXT,
-    "prioritize_latest": $PRIORITIZE_LATEST,
-    "ai_provider": "$AI_PROVIDER"
-  },
-  "files_generated": [
-    "$DIFF_PATH",
-    "$CHANGED_FILES_PATH",
-    "$CONTEXT_PATH",
-    "$DIFF_CONTEXT_PATH",
-    "$REVIEW_PROMPT",
-    "$REVIEW_OUTPUT",
-    "$COMMENTS_DELIVERABLE",
-    "$CONFIG_FILE",
-    "$FEATURES_MATRIX"
-  ]
+    log_success "Review prompt generated -> $REVIEW_PROMPT"
 }
-CONFIG
 
-log_success "Configuration generated -> $CONFIG_FILE"
+# === Generate Comments Deliverable ===
+generate_comments_deliverable() {
+    log_info "Generating review comments deliverable..."
+    
+    cat > "$COMMENTS_DELIVERABLE" << COMMENTS
+# 📝 Context-Aware Review Comments Deliverable
 
-# === Step 6: Execute AI Review ===
+## Review Metadata
+- **Feature Branch**: \`$FEATURE_BRANCH\`
+- **Base Branch**: \`$BASE_BRANCH\`
+- **Timestamp**: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+- **AI Provider**: $AI_PROVIDER
+- **Changed Files**: $CHANGED_FILES_COUNT
+- **Diff Lines**: $DIFF_SIZE
+- **Versions**: Symfony $SYMFONY_VERSION, PHP $PHP_VERSION
+
+## Instructions
+This file contains CQRS-aligned, context-aware review comments for the git diff. Each comment:
+- Focuses on changed code
+- Enforces Symfony $SYMFONY_VERSION and PHP $PHP_VERSION compatibility
+- Addresses security, performance, and testing
+- Provides actionable solutions
+
+**To use**:
+1. Review comments below
+2. Apply suggested changes
+3. Re-run the review script to verify
+
+## Comments
+$(if [ -f "$REVIEW_OUTPUT" ]; then
+    cat "$REVIEW_OUTPUT" | grep -A 20 "^#### 🔍 Comment #[0-9]*" 2>/dev/null || echo "No detailed comments generated by AI. Use $REVIEW_PROMPT manually."
+else
+    echo "No AI review output available. Use $REVIEW_PROMPT manually."
+fi)
+
+## Next Steps
+- Address critical and major issues
+- Optimize with minor suggestions
+- Re-run \`symfony-review $FEATURE_BRANCH --show\`
+- Ensure \`.vscode/\` is in \`.gitignore\`
+COMMENTS
+    log_success "Review comments deliverable generated -> $COMMENTS_DELIVERABLE"
+}
+
+# === Execute AI Review ===
 execute_ai_review() {
     log_info "Executing AI review with $AI_PROVIDER..."
-
+    
     case "$AI_PROVIDER" in
         "copilot")
             if command -v gh &>/dev/null; then
@@ -884,112 +795,81 @@ execute_ai_review() {
                 else
                     log_warning "GitHub Copilot review failed - check $REVIEW_OUTPUT manually"
                     echo "# GitHub Copilot Review Error" > "$REVIEW_OUTPUT"
-                    echo "Copilot review failed. Use the generated prompt manually." >> "$REVIEW_OUTPUT"
+                    echo "Copilot review failed. Use $REVIEW_PROMPT manually." >> "$REVIEW_OUTPUT"
+                    generate_comments_deliverable
                 fi
             else
                 log_warning "GitHub CLI not found - install 'gh' for Copilot integration"
                 echo "# GitHub Copilot Review Placeholder" > "$REVIEW_OUTPUT"
-                echo "Use the generated prompt with GitHub Copilot manually." >> "$REVIEW_OUTPUT"
+                echo "Use $REVIEW_PROMPT with GitHub Copilot manually." >> "$REVIEW_OUTPUT"
                 generate_comments_deliverable
             fi
             ;;
         "claude")
-            log_info "Claude AI integration requires API key setup"
+            log_warning "Claude AI integration requires API key setup"
             echo "# Claude AI Review Placeholder" > "$REVIEW_OUTPUT"
-            echo "Use the generated prompt with Claude AI manually." >> "$REVIEW_OUTPUT"
+            echo "Use $REVIEW_PROMPT with Claude AI manually." >> "$REVIEW_OUTPUT"
             generate_comments_deliverable
             ;;
         "gpt")
-            log_info "GPT integration requires OpenAI API setup"
+            log_warning "GPT integration requires OpenAI API setup"
             echo "# GPT Review Placeholder" > "$REVIEW_OUTPUT"
-            echo "Use the generated prompt with ChatGPT manually." >> "$REVIEW_OUTPUT"
+            echo "Use $REVIEW_PROMPT with ChatGPT manually." >> "$REVIEW_OUTPUT"
             generate_comments_deliverable
             ;;
         *)
             log_error "Invalid AI provider: $AI_PROVIDER"
-            exit 1
             ;;
     esac
 }
 
-# === Generate Comments Deliverable ===
-generate_comments_deliverable() {
-    log_info "Generating review comments deliverable..."
-
-    cat > "$COMMENTS_DELIVERABLE" << COMMENTS
-# 📝 Context-Aware Review Comments Deliverable
-
-## Review Metadata
-- **Feature Branch:** \`$FEATURE_BRANCH\`
-- **Base Branch:** \`$BASE_BRANCH\`
-- **Timestamp:** $(date -u +"%Y-%m-%dT%H:%M:%SZ")
-- **AI Provider:** $AI_PROVIDER
-- **Changed Files:** $CHANGED_FILES_COUNT
-- **Diff Lines:** $DIFF_SIZE
-
-## Instructions
-This file contains context-aware review comments generated based on the git diff. Each comment focuses on:
-- Changed code only
-- Integration with existing project patterns
-- Symfony 7.3+ feature prioritization
-- Actionable solutions with code examples
-
-**To use:**
-1. Review comments below
-2. Apply suggested changes to the feature branch
-3. Re-run the review script to verify improvements
-
-## Comments
-$(if [ -f "$REVIEW_OUTPUT" ]; then
-    cat "$REVIEW_OUTPUT" | grep -A 20 "^#### 🔍 Comment #[0-9]*" 2>/dev/null || echo "No detailed comments generated by AI. Use $REVIEW_PROMPT manually."
-else
-    echo "No AI review output available. Use $REVIEW_PROMPT manually."
-fi)
-
-## Next Steps
-- Address critical and major issues before merging
-- Consider minor optimizations for better integration
-- Re-run \`symfony-review $FEATURE_BRANCH --show\` to validate changes
-- Ensure \`.vscode/\` is in \`.gitignore\` to keep review files local
-COMMENTS
-
-    log_success "Review comments deliverable generated -> $COMMENTS_DELIVERABLE"
+# === Main Execution ===
+main() {
+    parse_arguments "$@"
+    validate_arguments
+    check_dependencies
+    load_version_config
+    mkdir -p "$VSCODE_DIR"
+    generate_features_matrix
+    generate_diff
+    if $SCAN_CONTEXT; then
+        scan_project_context
+        analyze_diff_context
+    fi
+    generate_review_prompt
+    execute_ai_review
+    
+    if $SHOW_REVIEW && [ -f "$REVIEW_OUTPUT" ]; then
+        log_info "Displaying review output..."
+        echo ""
+        echo "==================== REVIEW OUTPUT ===================="
+        cat "$REVIEW_OUTPUT"
+        echo "========================================================"
+    fi
+    
+    echo ""
+    log_success "Context-Aware Code Review Generation Complete!"
+    echo ""
+    echo "📂 Generated Files:"
+    echo "   📄 Diff:                $DIFF_PATH"
+    echo "   📋 Changed Files:       $CHANGED_FILES_PATH"
+    if $SCAN_CONTEXT; then
+        echo "   🏢 Global Context:      $CONTEXT_PATH"
+        echo "   🔍 Diff Context:        $DIFF_CONTEXT_PATH"
+    fi
+    echo "   📝 Review Prompt:       $REVIEW_PROMPT"
+    echo "   📊 Review Output:       $REVIEW_OUTPUT"
+    echo "   📋 Comments Deliverable: $COMMENTS_DELIVERABLE"
+    echo "   ⚙️ Configuration:       $CONFIG_FILE"
+    echo "   🆕 Features Matrix:     $FEATURES_MATRIX"
+    echo ""
+    echo "🔧 Next Steps:"
+    echo "   1. Review the prompt in $REVIEW_PROMPT"
+    echo "   2. Check comments in $COMMENTS_DELIVERABLE"
+    echo "   3. Apply suggested improvements to $FEATURE_BRANCH"
+    echo "   4. Re-run review to validate changes"
+    echo ""
+    echo "💡 Tip: Add '$VSCODE_DIR/' to your .gitignore to keep review files local"
 }
 
-execute_ai_review
-
-# === Step 7: Display Results ===
-if $SHOW_REVIEW && [ -f "$REVIEW_OUTPUT" ]; then
-    log_info "Displaying review output..."
-    echo ""
-    echo "==================== REVIEW OUTPUT ===================="
-    cat "$REVIEW_OUTPUT"
-    echo "========================================================"
-fi
-
-# === Final Summary ===
-echo ""
-echo "🎉 Context-Aware Code Review Generation Complete!"
-echo ""
-echo "📂 Generated Files:"
-echo "   📄 Diff:                $DIFF_PATH"
-echo "   📋 Changed Files:       $CHANGED_FILES_PATH"
-if $SCAN_CONTEXT; then
-    echo "   🏢 Global Context:      $CONTEXT_PATH"
-    echo "   🔍 Diff Context:        $DIFF_CONTEXT_PATH"
-fi
-echo "   📝 Review Prompt:       $REVIEW_PROMPT"
-echo "   📊 Review Output:       $REVIEW_OUTPUT"
-echo "   📋 Comments Deliverable: $COMMENTS_DELIVERABLE"
-echo "   ⚙️ Configuration:       $CONFIG_FILE"
-if $PRIORITIZE_LATEST; then
-    echo "   🆕 Features Matrix:     $FEATURES_MATRIX"
-fi
-echo ""
-echo "🔧 Next Steps:"
-echo "   1. Review the prompt in $REVIEW_PROMPT"
-echo "   2. Check comments in $COMMENTS_DELIVERABLE"
-echo "   3. Apply suggested improvements to $FEATURE_BRANCH"
-echo "   4. Re-run review to validate changes"
-echo ""
-echo "💡 Tip: Add '$VSCODE_DIR/' to your .gitignore to keep review files local"
+main "$@"

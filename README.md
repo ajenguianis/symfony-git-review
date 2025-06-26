@@ -71,6 +71,30 @@ symfony-review feature/quick-fix --no-context
   }
 }
 ```
+## 🆕 New Features
+
+### Version-Specific Analysis
+🔧 Auto-detects versions from:
+- composer.json
+- Runtime PHP version
+- User-configured .vscode/review-config.json
+
+### Expanded Tech Stack Support
+👁️‍🗨️ Reviews 5 file types:
+- PHP (.php)
+- Twig (.twig)
+- JavaScript (.js)
+- CSS/SCSS (.css, .scss)
+- Config files (.yaml, .xml)
+# Review latest commit in feature branch
+```bash
+COMMIT_HASH=$(git log -1 --pretty=format:%H) ./symfony-review.sh
+```
+### Smart Configuration
+⚙️ First-run setup wizard:
+```bash
+# Regenerate config
+rm .vscode/review-config.json && ./symfony-review.sh
 
 ### VS Code Integration
 Press `Ctrl+Shift+P` → "Tasks: Run Task" → "Symfony Code Review"
